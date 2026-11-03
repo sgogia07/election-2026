@@ -14,7 +14,17 @@ import httpx
 
 log = logging.getLogger(__name__)
 BASE = 'https://openamerica.io/elections/results.json'
-NEWS_RSS = 'https://news.google.com/rss/search?q=' + quote('2026 midterm election results when:1d') + '&hl=en-US&gl=US&ceid=US:en'
+# Publisher feeds are best-effort, with multiple independent fallbacks.
+# Headline links are attribution, not rights to reproduce publisher video or copy.
+NEWS_SOURCES = [
+    ('NPR Politics', 'https://feeds.npr.org/1014/rss.xml'),
+    ('PBS NewsHour Politics', 'https://www.pbs.org/newshour/feeds/rss/politics'),
+    ('Virginia Mercury', 'https://virginiamercury.com/feed/'),
+    ('WTOP', 'https://wtop.com/feed/'),
+    ('Google News', 'https://news.google.com/rss/search?q=' + quote('2026 midterm election results when:2d') + '&hl=en-US&gl=US&ceid=US:en'),
+]
+REGION_TERMS = ('virginia','fairfax','loudoun','prince william','arlington','alexandria','district 7','district 8','district 10','district 11','vindman','beyer','walkinshaw','subramanyam','warner','mizusawa','northern va','nova')
+
 OFFICES = ('House', 'Senate', 'Governor')
 
 
@@ -52,6 +62,8 @@ class ElectionStore:
         self.feeds = {o: {'office': o, 'live': False, 'stale': False, 'as_of': None,
                           'races': [], 'coverage_count': 0, 'source': 'Open America / official state election feeds'} for o in OFFICES}
         self.headlines = []
+        self.regional_headlines = []
+        self.news_sources = []
         self.events = []
         self.status = {'last_attempt': None, 'last_success': None, 'errors': {}, 'mode': 'demo' if os.getenv('DEMO_MODE') == '1' else 'live'}
         self.etags = {}
@@ -62,7 +74,7 @@ class ElectionStore:
     def snapshot(self):
         feeds = copy.deepcopy(self.feeds)
         return {'offices': feeds, 'headlines': copy.deepcopy(self.headlines),
-                'events': copy.deepcopy(self.events[-12:][::-1]), 'status': copy.deepcopy(self.status),
+                'events': copy.deepcopy(self.events[-12:][::-1]), 'regional_headlines': copy.deepcopy(self.regional_headlines), 'news_sources': copy.deepcopy(self.news_sources), 'status': copy.deepcopy(self.status),
                 'generated_at': utcnow(), 'disclaimer': 'Unofficial election-night counts. Partial state coverage. Leads are not race calls.'}
 
     def process(self, office, normalized):
@@ -104,18 +116,50 @@ class ElectionStore:
             self.status['errors'].pop(office, None)
 
     async def fetch_news(self, client):
-        res = await client.get(NEWS_RSS, headers={'User-Agent': 'ElectionCastRender/1.0'})
-        res.raise_for_status()
-        feed = feedparser.parse(res.text)
-        items = []
-        for entry in feed.entries[:16]:
-            title = unescape(re.sub('<[^>]+>', '', entry.get('title', ''))).strip()
-            if not title:
-                continue
-            items.append({'title': title[:190], 'source': entry.get('source', {}).get('title', 'Google News') if isinstance(entry.get('source'), dict) else 'Google News',
-                          'url': entry.get('link', ''), 'published': entry.get('published', '')})
-        self.headlines = items
-        self.status['errors'].pop('news', None)
+        """Collect independently; a single failed publisher cannot blank the news wall."""
+        import email.utils
+        import calendar
+        async def one(source, url):
+            try:
+                resp = await client.get(url, headers={'User-Agent': 'Mozilla/5.0 (ElectionCast/2.0; syndicated headline reader)'}, timeout=12)
+                resp.raise_for_status()
+                parsed = feedparser.parse(resp.content)
+                if not parsed.entries:
+                    raise ValueError('RSS returned no entries')
+                found = []
+                for entry in parsed.entries[:16]:
+                    title = unescape(re.sub('<[^>]+>', '', entry.get('title', ''))).strip()
+                    link = entry.get('link', '')
+                    if not title or not (link.startswith('http://') or link.startswith('https://')):
+                        continue
+                    # Do not auto-repeat fabricated/unsourced polling percentage claims.
+                    found.append({'title': title[:190], 'source': source, 'url': link,
+                                  'published': entry.get('published', '') or entry.get('updated', '')})
+                return found, None
+            except Exception as exc:
+                return [], str(exc)[:125]
+
+        responses = await asyncio.gather(*(one(name, url) for name,url in NEWS_SOURCES))
+        articles, healthy, failures = [], [], {}
+        for (source, _), (items, error) in zip(NEWS_SOURCES, responses):
+            if items: healthy.append(source); articles.extend(items)
+            if error: failures[source] = error
+        seen, unique = set(), []
+        for article in articles:
+            key = re.sub(r'[^a-z0-9]+', '', article['title'].lower())[:85]
+            if key in seen: continue
+            seen.add(key); unique.append(article)
+        # Preserve last good news during transient upstream outages.
+        if unique:
+            self.headlines = unique[:45]
+            self.regional_headlines = [a for a in unique if any(t in a['title'].lower() for t in REGION_TERMS)][:15]
+            self.status['last_news_success'] = utcnow()
+        self.news_sources = healthy
+        if healthy:
+            self.status['errors'].pop('news', None)
+            if failures: self.status['news_warnings'] = failures
+        else:
+            self.status['errors']['news'] = 'All publisher RSS sources are unavailable; cached headlines retained'
 
     async def demo(self):
         # Clearly labeled SIMULATED results, never mixed with actual results.

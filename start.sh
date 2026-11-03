@@ -19,7 +19,7 @@ Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp &
 sleep 3
 chromium --no-sandbox --disable-dev-shm-usage --disable-gpu --disable-infobars \
   --no-first-run --kiosk --window-size=1920,1080 --window-position=0,0 \
-  --app="http://127.0.0.1:${PORT}/" >/tmp/chromium.log 2>&1 &
+  --app="http://127.0.0.1:${PORT}/?broadcast=1" >/tmp/chromium.log 2>&1 &
 for i in $(seq 1 30); do
   if curl -fsS "http://127.0.0.1:${PORT}/api/health" >/dev/null; then break; fi
   sleep 1

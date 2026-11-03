@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: electioncast-2026
+    runtime: docker
+    plan: pro
+    healthCheckPath: /api/health
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: DEMO_MODE
+        value: "0"
+      - key: STREAM_ENABLED
+        value: "false"
+      - key: NARRATION_ENABLED
+        value: "true"
+      - key: OUTPUT_WIDTH
+        value: "1280"
+      - key: OUTPUT_HEIGHT
+        value: "720"
+      - key: VIDEO_BITRATE
+        value: "4000k"
+      - key: YOUTUBE_RTMPS_URL
+        value: rtmps://a.rtmps.youtube.com/live2
+      - key: YOUTUBE_STREAM_KEY
+        sync: false
